@@ -9,14 +9,24 @@ ENV_FILE="${ENV_FILE:-.env}"
 CONFIG_DIR="${CONFIG_DIR:-$(pwd)/univpn_config}"
 
 if [ ! -f "$ENV_FILE" ]; then
-  echo "missing env file: $ENV_FILE" >&2
+  echo "missing env file: $ENV_FILE (copy .env.example to .env)" >&2
   exit 1
 fi
 
-if [ ! -d "$CONFIG_DIR" ]; then
-  echo "missing config dir: $CONFIG_DIR" >&2
-  exit 1
-fi
+require_env() {
+  key="$1"
+  if ! grep -Eq "^${key}=.+" "$ENV_FILE"; then
+    echo "missing ${key} in $ENV_FILE" >&2
+    exit 1
+  fi
+}
+
+require_env VPN_USERNAME
+require_env VPN_PASSWORD
+require_env VPN_SERVER_IP
+require_env VPN_SERVER_PORT
+
+mkdir -p "$CONFIG_DIR"
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
   echo "removing existing container: $NAME"

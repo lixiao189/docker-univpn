@@ -18,13 +18,40 @@ The client binary is included at `bin/univpn-linuxarm-64-10781.21.0.0831.zip` so
 docker build --platform linux/arm64 -t univpn-cli:arm64 .
 ```
 
-## Run
+## Configure
 
-Create `.env` from `.envexample` and a config directory (the client writes profiles under `univpn_config/`):
+All VPN settings live in `.env`. On start, the entrypoint writes the gateway into `univpn_config/sysconfig.ini` and the profile under `univpn_config/config/`. Do not edit those files by hand, and do not commit `.env`.
 
 ```bash
-cp .envexample .env
-mkdir -p univpn_config
+cp .env.example .env
+```
+
+```bash
+VPN_SERVER_IP=your_gateway_ip
+VPN_SERVER_PORT=your_gateway_port
+VPN_USERNAME=your_username
+VPN_PASSWORD=your_password
+AUTO_RECONNECT=true
+```
+
+`VPN_USERNAME`, `VPN_PASSWORD`, `VPN_SERVER_IP`, and `VPN_SERVER_PORT` are required. `univpn-keeper.sh` types the username and password into the CLI. The server values become `GatewayAddress`, `GatewayPort`, and `LastLoginAddr`. Optional names are listed in `.env.example`.
+
+`run-cli.sh` creates `univpn_config/` if it is missing. That directory stays gitignored because the client stores the rendered profile there.
+
+### Local proxy ports
+
+These are published on the host loopback by `run-cli.sh` and are not the VPN server:
+
+| Proxy | Address |
+| :---- | :------ |
+| SOCKS5 (Dante) | `127.0.0.1:1080` |
+| HTTP (Tinyproxy) | `127.0.0.1:8888` |
+
+Change the host side of `-p 127.0.0.1:1080:1080` or `-p 127.0.0.1:8888:8888` in `run-cli.sh` if those ports are already in use. Leave the container ports as they are unless you also edit `danted.conf` and `tinyproxy.conf`.
+
+## Run
+
+```bash
 ./run-cli.sh
 ```
 

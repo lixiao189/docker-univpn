@@ -1,85 +1,133 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-CONFIG_FILE="/home/vpnuser/UniVPN/sysconfig.ini"
+CONFIG_DIR="/home/vpnuser/UniVPN"
+CONFIG_FILE="${CONFIG_DIR}/sysconfig.ini"
+PROFILE_DIR="${CONFIG_DIR}/config"
+PROFILE_NAME="${VPN_PROFILE_NAME:-school.ini}"
+PROFILE_FILE="${PROFILE_DIR}/${PROFILE_NAME}"
 KEEPER_SCRIPT="/usr/local/bin/univpn-keeper.sh"
 
 echo "========================================="
 echo "UniVPN Container Initialization"
 echo "========================================="
 
-# Display current user
 echo "Running as user: $(whoami) (UID=$(id -u), GID=$(id -g))"
 echo "Home directory: $HOME"
 
-# 1. Check if expect is installed
-if ! command -v expect &> /dev/null; then
-    echo "ERROR: 'expect' is not installed. Installing..."
-    apt-get update && apt-get install -y expect
-fi
-
-# 2. Fix the config file to enable AutoLogin
-if [ -f "$CONFIG_FILE" ]; then
-    echo "Checking $CONFIG_FILE..."
-    
-    # Get the profile name
-    TARGET_PROFILE=$(grep "^ClientLastAccessSession" "$CONFIG_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
-    
-    if [ -n "$TARGET_PROFILE" ]; then
-        # Find the section header for this profile
-        SESSION_HEADER=$(awk -v target="$TARGET_PROFILE" '
-            /^\[.*\]/ { header=$0 }
-            $0 ~ "ProfileName *= *" target { print header; exit }
-        ' "$CONFIG_FILE")
-        
-        if [ -n "$SESSION_HEADER" ]; then
-            echo "Found target section: $SESSION_HEADER"
-            # Escape brackets for sed
-            ESCAPED_HEADER=$(echo "$SESSION_HEADER" | sed 's/\[/\\[/g; s/\]/\\]/g')
-            # Replace AutoLogin=0 with 1 only inside that section
-            sed -i "/^$ESCAPED_HEADER/,/^\[/ s/AutoLogin *= *0/AutoLogin = 1/" "$CONFIG_FILE"
-            echo "✓ Updated AutoLogin to 1"
-        else
-            echo "⚠ Could not find session header for profile: $TARGET_PROFILE"
-        fi
-    else
-        echo "⚠ No ClientLastAccessSession found in config"
+missing=0
+for name in VPN_USERNAME VPN_PASSWORD VPN_SERVER_IP VPN_SERVER_PORT; do
+    if [ -z "${!name:-}" ]; then
+        echo "ERROR: ${name} is not set. Copy .env.example to .env and fill it in."
+        missing=1
     fi
-else
-    echo "⚠ Config file not found: $CONFIG_FILE"
-    echo "  This is normal on first run. Config will be created after first manual connection."
+done
+if [ "$missing" -ne 0 ]; then
+    exit 1
 fi
 
-# 3. Display configuration
+case "$VPN_SERVER_IP" in
+    *[!0-9.]*)
+        echo "ERROR: VPN_SERVER_IP must be an IPv4 address"
+        exit 1
+        ;;
+esac
+case "$VPN_SERVER_PORT" in
+    ''|*[!0-9]*)
+        echo "ERROR: VPN_SERVER_PORT must be a number"
+        exit 1
+        ;;
+esac
+if [ "$VPN_SERVER_PORT" -lt 1 ] || [ "$VPN_SERVER_PORT" -gt 65535 ]; then
+    echo "ERROR: VPN_SERVER_PORT must be between 1 and 65535"
+    exit 1
+fi
+case "$PROFILE_NAME" in
+    *[/\\]*|.|..)
+        echo "ERROR: VPN_PROFILE_NAME must be a file name, not a path"
+        exit 1
+        ;;
+esac
+
+mkdir -p "$PROFILE_DIR"
+
+cat > "$CONFIG_FILE" <<EOF
+[GLOBAL]
+ClientName = 
+ClientVersion = 
+ClientCustomized = 
+ClientLogLevel = 1
+
+[ADVANCED]
+ClientDetectLatestVersion = 1
+ClientAutoBoot = 1
+ClientLanguageID = 1000
+ClientServerCheck = 1
+ClientShowLogFlag = 0
+ClientLastAccessSession = ${PROFILE_NAME}
+ClientSwitchNetwork = 0
+ClientTcpBufferSize = 0
+ClientMtuValue = 1300
+
+ClientReConnectTimeValue = 5
+[PROXY]
+ProxyType = 0
+ProxyAddr = 
+ProxyPort = 0
+ProxyUser = 
+ProxyInfo = 
+
+[Session0]
+ConnectType = 1
+RemPwd = 0
+AuthType = 0
+AutoLogin = 1
+LastLoginAddr = ${VPN_SERVER_IP}:${VPN_SERVER_PORT}
+ProfileName = ${PROFILE_NAME}
+ProfileUser = ${VPN_USERNAME}
+ProfileInfo = 
+
+[Session1]
+ProfileInfo = 
+EOF
+
+cat > "$PROFILE_FILE" <<EOF
+[GLOBAL]
+sign_certificate = 
+encryp_certificate = 
+iConnectionType = 1
+Description = 
+GatewayAddress = ${VPN_SERVER_IP}
+GatewayPort = ${VPN_SERVER_PORT}
+TunnelMode = 2
+PreflinkEnable = 0
+DefaultGateway = -1
+iroutecoverEnable = 1
+icertificateEnable = 0
+igmalgorithmEnable = 0
+PreflinkTotal = 0
+EOF
+
+echo "Wrote gateway ${VPN_SERVER_IP}:${VPN_SERVER_PORT} to ${PROFILE_NAME}"
+
 echo ""
 echo "Configuration:"
+echo "  VPN_SERVER: ${VPN_SERVER_IP}:${VPN_SERVER_PORT}"
+echo "  VPN_PROFILE: ${PROFILE_NAME}"
 echo "  AUTO_RECONNECT: ${AUTO_RECONNECT:-true}"
 echo "  RECONNECT_PING_TARGET: ${RECONNECT_PING_TARGET:-8.8.8.8}"
 echo "  RECONNECT_GRACE_PERIOD: ${RECONNECT_GRACE_PERIOD:-60}s"
 echo "  HEALTH_CHECK_INTERVAL: ${HEALTH_CHECK_INTERVAL:-10}s"
-echo "  VPN_USERNAME: ${VPN_USERNAME:+***set***}"
-echo "  VPN_PASSWORD: ${VPN_PASSWORD:+***set***}"
-
-# 4. Validate credentials if auto-reconnect is enabled
-if [ "${AUTO_RECONNECT:-true}" = "true" ]; then
-    if [ -z "$VPN_USERNAME" ] || [ -z "$VPN_PASSWORD" ]; then
-        echo ""
-        echo "ERROR: AUTO_RECONNECT is enabled but credentials are missing!"
-        echo "Please set VPN_USERNAME and VPN_PASSWORD environment variables."
-        exit 1
-    fi
-fi
+echo "  VPN_USERNAME: ***set***"
+echo "  VPN_PASSWORD: ***set***"
 
 echo "========================================="
 echo "Starting UniVPN Keeper..."
 echo "========================================="
 echo ""
 
-# 5. Execute the keeper script or custom command
 if [ $# -eq 0 ]; then
-    # No arguments provided, use default keeper script
     exec "$KEEPER_SCRIPT"
 else
-    # Custom command provided
     exec "$@"
 fi
