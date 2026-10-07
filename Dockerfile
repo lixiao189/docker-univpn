@@ -1,22 +1,17 @@
-# Use Ubuntu 22.04 LTS as the base image
-FROM ubuntu:22.04
+# Ubuntu 24.04: the Linux ARM client (UniVPNCS) needs glibc >= 2.25.
+# Native arm64 only — do not build this image under qemu linux/amd64.
+FROM ubuntu:24.04
 
 # Set Arguments
 ARG CLIENT_VERSION=10781.21.0.0831
-ARG ZIP_FILE_REL_PATH=bin/univpn-linux-64-${CLIENT_VERSION}.zip
+ARG ZIP_FILE_REL_PATH=bin/univpn-linuxarm-64-${CLIENT_VERSION}.zip
 ARG INSTALLER_SOURCE_DIR=/home/UniVPN
 ARG ACTUAL_INSTALL_DIR=/usr/local/UniVPN
-ARG GUI_APP_PATH=${ACTUAL_INSTALL_DIR}
-ARG GUI_APP_EXEC=UniVPN
 ARG INSTALL_LOG_DIR=${ACTUAL_INSTALL_DIR}/log
 ARG INSTALL_LOG_FILE=${INSTALL_LOG_DIR}/install.log
-ARG FONTS_DIR=/usr/share/fonts
 ARG USERNAME=vpnuser
 ARG USER_UID=1000
 ARG USER_GID=1000
-ARG VNC_PASSWORD=univpn
-ARG VNC_RESOLUTION=1280x800
-ARG VNC_DEPTH=24
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -24,22 +19,12 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV USER=${USERNAME}
 ENV HOME=/home/${USERNAME}
-ENV DISPLAY=:1
-ENV VNC_RESOLUTION=${VNC_RESOLUTION}
-ENV VNC_PW=${VNC_PASSWORD}
-ENV VNC_DEPTH=${VNC_DEPTH}
 ENV TZ=Asia/Shanghai
 
 # --- Auto Reconnect Configuration ---
 ENV AUTO_RECONNECT=false
 ENV RECONNECT_PING_TARGET=8.8.8.8
 ENV RECONNECT_GRACE_PERIOD=60
-
-# --- Pre-configure debconf for keyboard-configuration ---
-RUN echo "keyboard-configuration keyboard-configuration/layoutcode string us" | debconf-set-selections && \
-    echo "keyboard-configuration keyboard-configuration/modelcode string pc105" | debconf-set-selections && \
-    echo "keyboard-configuration keyboard-configuration/variantcode string ''" | debconf-set-selections && \
-    echo "keyboard-configuration keyboard-configuration/xkb-keymap select us" | debconf-set-selections
 
 # Install dependencies
 RUN apt-get update && \
@@ -48,30 +33,16 @@ RUN apt-get update && \
     locales \
     ca-certificates \
     sudo \
+    expect \
+    procps \
     net-tools \
     iproute2 \
     iputils-ping \
-    dante-server \   
-    tinyproxy \   
+    dante-server \
+    tinyproxy \
     dbus \
     tzdata \
-    libx11-6 \
-    libxext6 \
-    libxrender1 \
-    libxtst6 \
-    libqt5widgets5 \
-    libqt5gui5 \
-    libqt5core5a \
-    libqt5dbus5 \
-    fonts-liberation \
-    fonts-noto-core \
-    fonts-wqy-zenhei \
-    tigervnc-standalone-server \
-    tigervnc-tools \
-    fluxbox \
     supervisor \
-    novnc \
-    websockify \
     && \
     locale-gen C.UTF-8 && \
     apt-get clean && \
@@ -83,11 +54,6 @@ RUN ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && \
     mkdir -p /var/run/dbus && \
     chown messagebus:messagebus /var/run/dbus
 
-# --- Add Font Cache Update Step ---
-RUN echo "Updating font cache..." && \
-    fc-cache -fv && \
-    echo "Font cache updated."
-
 # --- Create a Helper Reconnect Command ---
 RUN echo '#!/bin/bash' > /usr/local/bin/reconnect && \
     echo 'echo "Killing UniVPN process to trigger restart..."' >> /usr/local/bin/reconnect && \
@@ -95,9 +61,18 @@ RUN echo '#!/bin/bash' > /usr/local/bin/reconnect && \
     chmod +x /usr/local/bin/reconnect
 
 # Create the non-root user and group, add to sudoers
-RUN groupadd --gid ${USER_GID} ${USERNAME} && \
-    useradd --uid ${USER_UID} --gid ${USER_GID} --shell /bin/bash --create-home ${USERNAME} && \
-    adduser ${USERNAME} sudo && \
+# Ubuntu 24.04 already has user/group ubuntu at UID/GID 1000.
+# Rename it so the container user still matches a typical host mount.
+RUN if getent passwd ${USER_UID} >/dev/null; then \
+        EXISTING_USER=$(getent passwd ${USER_UID} | cut -d: -f1); \
+        EXISTING_GROUP=$(getent group ${USER_GID} | cut -d: -f1); \
+        usermod -l ${USERNAME} -d /home/${USERNAME} -m "$EXISTING_USER"; \
+        groupmod -n ${USERNAME} "$EXISTING_GROUP"; \
+    else \
+        groupadd --gid ${USER_GID} ${USERNAME}; \
+        useradd --uid ${USER_UID} --gid ${USER_GID} --shell /bin/bash --create-home ${USERNAME}; \
+    fi && \
+    usermod -aG sudo ${USERNAME} && \
     echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
 # Verify home directory ownership and permissions
@@ -136,10 +111,6 @@ RUN INSTALLER_RUN_FILE=$(ls univpn-linux-*-*.run 2>/dev/null | head -1) && \
 # Ensure the target log directory exists BEFORE running the installer
 RUN mkdir -p ${INSTALL_LOG_DIR}
 
-# Ensure the target fonts directory exists BEFORE running the installer
-RUN mkdir -p ${FONTS_DIR} && \
-    echo "Ensured directory ${FONTS_DIR} exists."
-
 # Run the installer FROM the current directory, redirecting output to the log file
 RUN . /tmp/installer_env.sh && \
     echo "Running installer as root from $(pwd)... Output logged to ${INSTALL_LOG_FILE}" && \
@@ -153,7 +124,7 @@ RUN . /tmp/installer_env.sh && \
     rm /tmp/installer_env.sh && \
     echo "Removed installer file and environment script."
 
-# --- VNC/Supervisor/noVNC Setup ---
+# --- Supervisor Setup ---
 # Create supervisor log directory
 RUN mkdir -p /var/log/supervisor
 
@@ -167,36 +138,22 @@ RUN chown ${USERNAME}:${USERNAME} /etc/danted.conf
 # Copy Tinyproxy configuration
 COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
 
-# Copy VNC startup script and Fluxbox config
-COPY vnc_startup.sh /usr/local/bin/vnc_startup.sh
-RUN mkdir -p /home/${USERNAME}/.fluxbox && \
-    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.fluxbox
-COPY fluxbox_keys /home/${USERNAME}/.fluxbox/keys
-COPY fluxbox_menu /home/${USERNAME}/.fluxbox/menu
-RUN chmod +x /usr/local/bin/vnc_startup.sh && \
-    chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.fluxbox/*
-
 # Copy Dante wrapper script
 COPY wait_and_start_dante.sh /usr/local/bin/wait_and_start_dante.sh
 RUN chmod +x /usr/local/bin/wait_and_start_dante.sh
-
-# Copy noVNC launch script
-COPY novnc_launch.sh /usr/local/bin/novnc_launch.sh
-RUN chmod +x /usr/local/bin/novnc_launch.sh
 
 # --- Copy the UniVPN Keeper Script ---
 COPY univpn-keeper.sh /usr/local/bin/univpn-keeper.sh
 RUN chmod +x /usr/local/bin/univpn-keeper.sh
 
-# --- Copy the Xtigervnc-session Script ---
-COPY Xtigervnc-session /etc/X11/Xtigervnc-session
-RUN chmod +x /etc/X11/Xtigervnc-session
+# --- Config UniVPN session autoconnect ---
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Set final working directory to user's home
 WORKDIR /home/${USERNAME}
 
-# Expose VNC and noVNC ports
-EXPOSE 5901 6901
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Run Supervisor as the main process
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
@@ -204,4 +161,4 @@ CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
 # --- Optional Metadata ---
 LABEL maintainer="Xavier Xiong <zx900930@gmail.com>"
 LABEL version="${CLIENT_VERSION}"
-LABEL description="Docker container with VNC access for Huawei UniVPN GUI Client (v${CLIENT_VERSION})"
+LABEL description="Docker container for Leagsoft UniVPN CLI Client, linux/arm64 (v${CLIENT_VERSION})"
